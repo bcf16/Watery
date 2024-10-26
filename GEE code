@@ -1,0 +1,675 @@
+Map.centerObject(roi_burdur,4);
+
+//Set up UI elements in the App
+
+// Create a user interface panel
+var panel = ui.Panel({
+  style: {
+    width: '250px',
+    position: 'bottom-left' 
+  }
+});
+
+var excludeSnowCheckbox = ui.Checkbox({
+  label: 'Exclude Snow',
+  value: false // Default to including snow
+});
+
+
+var draw_aoi_button = ui.Button({
+    label: "Draw ROI",
+    style: {
+        width: "100px"
+    },
+    onClick: function() {
+        // Set the drawing mode to 'polygon' when the button is clicked
+        Map.drawingTools().setShape('polygon');
+        Map.drawingTools().draw();
+    }
+});
+
+Map.setControlVisibility({all: true}); // Show all controls
+Map.drawingTools().setShown(false); // Hide the drawing tools by default
+
+// Add UI elements
+var titleLabel = ui.Label('LAKE CLASSIFICATION');
+
+var roiLabel = ui.Label('Select a Lake:');
+
+// Initialize drawing tools and get the geometry layer
+var drawingTools = Map.drawingTools();
+drawingTools.setShown(true); 
+
+
+
+// Add an event listener to the drawing tools to detect changes
+drawingTools.onDraw(function(newRoi) {
+  if (newRoi) {
+    var area = newRoi.area().round();
+
+    // Create a UI layer from the newRoi geometry and add it to the map
+    var roiLayer = ui.Map.Layer(newRoi, {
+      color: 'blue',
+      opacity: 0.5 
+    });
+    Map.layers().reset([roiLayer]); 
+  } else {
+    roiInfoLabel.setValue('No ROI selected yet');
+    Map.layers().reset([]); 
+  }
+});
+
+var startDateLabel = ui.Label('Start Date (YYYY-MM-DD):');
+
+var startDateInput = ui.Textbox({value: '2023-01-13'});
+
+
+var endDateLabel = ui.Label('End Date (YYYY-MM-DD):');
+
+var endDateInput = ui.Textbox({value: '2023-02-25'});
+
+var classAreaLabel = ui.Label('Class Area Coverage (km²): ');
+
+var runButton = ui.Button({
+    label: "Run Classification",
+    style: {
+        width: "150px"
+    }
+});
+
+
+runButton.onClick(function() {
+  // Get user inputs
+  var roi = drawingTools.layers().get(0).getEeObject();
+  if (!roi) {
+    ui.Alert('Please select a Region of Interest (ROI) before running the classification.');
+    return; // Stop execution if no ROI is selected
+  }
+
+var startDateString = startDateInput.getValue();
+  var endDateString = endDateInput.getValue();
+
+  // Validate date format (YYYY-MM-DD)
+  var dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!dateRegex.test(startDateString) || !dateRegex.test(endDateString)) {
+    alert('Invalid date format. Please use YYYY-MM-DD.');
+    return; // Stop execution if dates are invalid
+  }
+
+  // Convert strings to Date objects
+  var startDate = ee.Date(startDateString);
+  var endDate = ee.Date(endDateString);
+
+  // Additional date validation (optional)
+  if (startDate > endDate) {
+    alert('Start date cannot be later than end date.');
+    return; 
+  }
+
+var indices = function(img) {
+  var ndvi = img.normalizedDifference(['B8','B4']).rename('NDVI');
+  var ndwi = img.normalizedDifference(['B3', 'B8']).rename('NDWI');
+  var ndbi = img.normalizedDifference(['B11', 'B8']).rename(['NDBI']);
+  
+  return img.addBands(ndvi).addBands(ndwi).addBands(ndbi)
+  
+}
+
+
+//retrieve dates of image for training RFC
+var start_date_training = '2023-01-13'
+var end_date_training = '2023-02-25'
+var period_training = ee.Filter.date(start_date_training,end_date_training);
+// Create a S2 Composite to use as input to classification
+var s2_training = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED');
+
+// Import Sentinel-1 collection for training (burdur)
+var sentinel1_training_burdur =  ee.ImageCollection('COPERNICUS/S1_GRD');
+// Filter Sentinel-1 collection for study area, date ranges and polarization components
+var sCollection_training_burdur =  sentinel1_training_burdur
+                    //filter by aoi and time
+                    .filterBounds(roi_burdur)
+                    .filter(period_training)
+                    // Filter to get images with VV and VH dual polarization
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+                    // Filter to get images collected in interferometric wide swath mode.
+                    .filter(ee.Filter.eq('instrumentMode', 'IW'));
+// Also filter based on the orbit: descending or ascending mode
+var desc_training_burdur = sCollection_training_burdur.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+var asc_training_burdur = sCollection_training_burdur.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+print("descending tiles ",desc_training_burdur.size());
+print("ascending tiles ",asc_training_burdur.size());
+print(asc_training_burdur.first());
+
+// Create a composite from means at different polarizations and look angles.
+var composite_training_burdur = ee.Image.cat([
+  asc_training_burdur.select('VH').mean(),
+  asc_training_burdur.select('VV').mean(),
+  desc_training_burdur.select('VH').mean(),
+  desc_training_burdur.select('VV').mean()
+]).focal_median();
+// Display as a composite of polarization and backscattering characteristics.
+
+
+var dwfiltered_training_burdur = s2_training
+  .filter(ee.Filter.date(start_date_training, end_date_training))
+  .filter(ee.Filter.bounds(roi_burdur))
+  .select('B.*')
+  .map(indices)
+  
+var dwcomposite_training_burdur = dwfiltered_training_burdur
+  .median();
+
+// Import Sentinel-1 collection for training (mead)
+var sentinel1_training_mead =  ee.ImageCollection('COPERNICUS/S1_GRD');
+// Filter Sentinel-1 collection for study area, date ranges and polarization components
+var sCollection_training_mead =  sentinel1_training_mead
+                    //filter by aoi and time
+                    .filterBounds(roi_mead)
+                    .filter(period_training)
+                    // Filter to get images with VV and VH dual polarization
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+                    // Filter to get images collected in interferometric wide swath mode.
+                    .filter(ee.Filter.eq('instrumentMode', 'IW'));
+// Also filter based on the orbit: descending or ascending mode
+var desc_training_mead = sCollection_training_mead.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+var asc_training_mead = sCollection_training_mead.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+print("descending tiles ",desc_training_mead.size());
+print("ascending tiles ",asc_training_mead.size());
+print(asc_training_mead.first());
+
+// Create a composite from means at different polarizations and look angles.
+var composite_training_mead = ee.Image.cat([
+  asc_training_mead.select('VH').mean(),
+  asc_training_mead.select('VV').mean(),
+  desc_training_mead.select('VH').mean(),
+  desc_training_mead.select('VV').mean()
+]).focal_median();
+// Display as a composite of polarization and backscattering characteristics.
+
+
+var dwfiltered_training_mead = s2_training
+  .filter(ee.Filter.date(start_date_training, end_date_training))
+  .filter(ee.Filter.bounds(roi_mead))
+  .select('B.*')
+  .map(indices)
+  
+var dwcomposite_training_mead = dwfiltered_training_mead
+  .median();
+
+// Import Sentinel-1 collection for training (egirdir)
+var sentinel1_training_egirdir =  ee.ImageCollection('COPERNICUS/S1_GRD');
+// Filter Sentinel-1 collection for study area, date ranges and polarization components
+var sCollection_training_egirdir =  sentinel1_training_egirdir
+                    //filter by aoi and time
+                    .filterBounds(roi_egirdir)
+                    .filter(period_training)
+                    // Filter to get images with VV and VH dual polarization
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+                    // Filter to get images collected in interferometric wide swath mode.
+                    .filter(ee.Filter.eq('instrumentMode', 'IW'));
+// Also filter based on the orbit: descending or ascending mode
+var desc_training_egirdir = sCollection_training_egirdir.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+var asc_training_egirdir = sCollection_training_egirdir.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+print("descending tiles ",desc_training_egirdir.size());
+print("ascending tiles ",asc_training_egirdir.size());
+print(asc_training_egirdir.first());
+
+// Create a composite from means at different polarizations and look angles.
+var composite_training_egirdir = ee.Image.cat([
+  asc_training_egirdir.select('VH').mean(),
+  asc_training_egirdir.select('VV').mean(),
+  desc_training_egirdir.select('VH').mean(),
+  desc_training_egirdir.select('VV').mean()
+]).focal_median();
+// Display as a composite of polarization and backscattering characteristics.
+
+  
+var dwfiltered_training_egirdir = s2_training
+  .filter(ee.Filter.date(start_date_training, end_date_training))
+  .filter(ee.Filter.bounds(roi_egirdir))
+  .select('B.*')
+  .map(indices)
+  
+var dwcomposite_training_egirdir = dwfiltered_training_egirdir
+  .median();
+
+// Import Sentinel-1 collection for training (beysehir)
+var sentinel1_training_beysehir =  ee.ImageCollection('COPERNICUS/S1_GRD');
+// Filter Sentinel-1 collection for study area, date ranges and polarization components
+var sCollection_training_beysehir =  sentinel1_training_beysehir
+                    //filter by aoi and time
+                    .filterBounds(roi_beysehir)
+                    .filter(period_training)
+                    // Filter to get images with VV and VH dual polarization
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+                    // Filter to get images collected in interferometric wide swath mode.
+                    .filter(ee.Filter.eq('instrumentMode', 'IW'));
+// Also filter based on the orbit: descending or ascending mode
+var desc_training_beysehir = sCollection_training_beysehir.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+var asc_training_beysehir = sCollection_training_beysehir.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+print("descending tiles ",desc_training_beysehir.size());
+print("ascending tiles ",asc_training_beysehir.size());
+print(asc_training_beysehir.first());
+
+// Create a composite from means at different polarizations and look angles.
+var composite_training_beysehir = ee.Image.cat([
+  asc_training_beysehir.select('VH').mean(),
+  asc_training_beysehir.select('VV').mean(),
+  desc_training_beysehir.select('VH').mean(),
+  desc_training_beysehir.select('VV').mean()
+]).focal_median();
+// Display as a composite of polarization and backscattering characteristics.
+
+  
+var dwfiltered_training_beysehir = s2_training
+  .filter(ee.Filter.date(start_date_training, end_date_training))
+  .filter(ee.Filter.bounds(roi_beysehir))
+  .select('B.*')
+  .map(indices)
+  
+var dwcomposite_training__beysehir = dwfiltered_training_beysehir
+  .median();
+
+// Import Sentinel-1 collection for training (titicaca)
+var sentinel1_training_titicaca =  ee.ImageCollection('COPERNICUS/S1_GRD');
+// Filter Sentinel-1 collection for study area, date ranges and polarization components
+var sCollection_training_titicaca =  sentinel1_training_titicaca
+                    //filter by aoi and time
+                    .filterBounds(roi_titicaca)
+                    .filter(period_training)
+                    // Filter to get images with VV and VH dual polarization
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+                    // Filter to get images collected in interferometric wide swath mode.
+                    .filter(ee.Filter.eq('instrumentMode', 'IW'));
+// Also filter based on the orbit: descending or ascending mode
+var desc_training_titicaca = sCollection_training_titicaca.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+var asc_training_titicaca = sCollection_training_titicaca.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+print("descending tiles ",desc_training_titicaca.size());
+print("ascending tiles ",asc_training_titicaca.size());
+print(asc_training_titicaca.first());
+
+// Create a composite from means at different polarizations and look angles.
+var composite_training_titicaca = ee.Image.cat([
+  asc_training_titicaca.select('VH').mean(),
+  asc_training_titicaca.select('VV').mean(),
+  desc_training_titicaca.select('VH').mean(),
+  desc_training_titicaca.select('VV').mean()
+]).focal_median();
+// Display as a composite of polarization and backscattering characteristics.
+
+  
+var dwfiltered_training_titicaca = s2_training
+  .filter(ee.Filter.date(start_date_training, end_date_training))
+  .filter(ee.Filter.bounds(roi_titicaca))
+  .select('B.*')
+  .map(indices)
+  
+var dwcomposite_training__titicaca = dwfiltered_training_titicaca
+  .median();
+
+// Import Sentinel-1 collection for training (urmia)
+var sentinel1_training_urmia =  ee.ImageCollection('COPERNICUS/S1_GRD');
+// Filter Sentinel-1 collection for study area, date ranges and polarization components
+var sCollection_training_urmia =  sentinel1_training_urmia
+                    //filter by aoi and time
+                    .filterBounds(roi_urmia)
+                    .filter(period_training)
+                    // Filter to get images with VV and VH dual polarization
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+                    // Filter to get images collected in interferometric wide swath mode.
+                    .filter(ee.Filter.eq('instrumentMode', 'IW'));
+// Also filter based on the orbit: descending or ascending mode
+var desc_training_urmia = sCollection_training_urmia.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+var asc_training_urmia = sCollection_training_urmia.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+print("descending tiles ",desc_training_urmia.size());
+print("ascending tiles ",asc_training_urmia.size());
+print(asc_training_urmia.first());
+
+// Create a composite from means at different polarizations and look angles.
+var composite_training_urmia = ee.Image.cat([
+  asc_training_urmia.select('VH').mean(),
+  asc_training_urmia.select('VV').mean(),
+  desc_training_urmia.select('VH').mean(),
+  desc_training_urmia.select('VV').mean()
+]).focal_median();
+// Display as a composite of polarization and backscattering characteristics.
+
+
+var dwfiltered_training_urmia = s2_training
+  .filter(ee.Filter.date(start_date_training, end_date_training))
+  .filter(ee.Filter.bounds(roi_urmia))
+  .select('B.*')
+  .map(indices)
+  
+var dwcomposite_training_urmia = dwfiltered_training_urmia
+  .median();
+
+
+//retrieve dates for image that will be classified
+
+
+
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED');
+
+var period = ee.Filter.date(startDate,endDate);
+
+var S2filtered = s2
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 50))
+  .filter(ee.Filter.date(startDate, endDate))
+  .filter(ee.Filter.bounds(roi))
+  .select('B.*')
+  .map(indices);
+
+var S2composite = S2filtered
+  .median()
+
+// Import Sentinel-1 collection
+var sentinel1 =  ee.ImageCollection('COPERNICUS/S1_GRD');
+// Filter Sentinel-1 collection for study area, date ranges and polarization components
+var sCollection =  sentinel1
+                    //filter by aoi and time
+                    .filterBounds(roi)
+                    .filter(period)
+                    // Filter to get images with VV and VH dual polarization
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+                    // Filter to get images collected in interferometric wide swath mode.
+                    .filter(ee.Filter.eq('instrumentMode', 'IW'));
+// Also filter based on the orbit: descending or ascending mode
+var desc = sCollection.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+var asc = sCollection.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+// Inspect number of tiles returned after the search; we will use the one with more tiles
+print("descending tiles ",desc.size());
+print("ascending tiles ",asc.size());
+// Also Inspect one file
+print(asc.first());
+
+// Create a composite from means at different polarizations and look angles.
+var S1composite = ee.Image.cat([
+  asc.select('VH').mean(),
+  asc.select('VV').mean(),
+  desc.select('VH').mean(),
+  desc.select('VV').mean()
+]).focal_median();
+// Display as a composite of polarization and backscattering characteristics.
+Map.addLayer(S1composite.clip(roi), {min: [-25, -20, -25], max: [0, 10, 0]}, 'S1composite');
+
+//select bands for visualisation
+
+var fused = S2composite.addBands(S1composite);
+
+
+// Print or visualize the fused image for Lake Tuz
+print('Fused Image', fused);
+Map.addLayer(fused, {bands: ['B4', 'B3', 'B2'], min: 0, max: 3000}, 'Fused Image'); // Adjust visualization parameters as needed
+
+var visParamsTrue = {bands: ['B4', 'B3', 'B2'], min: 0, max: 2500, gamma: 1.1};
+Map.addLayer(S2composite, visParamsTrue, "Sentinel 2 RGB");
+
+
+
+//Merge data
+//exclude snow class depending on user preference
+
+
+//Merge data
+//exclude snow class depending on user preference
+var gcps;
+if (excludeSnowCheckbox.getValue()) { 
+  gcps = water_burder.merge(built_burder).merge(vegetation_burder).merge(bare_burder).merge(water_mead).merge(built_mead).merge(vegetation_mead).merge(bare_mead).merge(water_egirdir).merge(built_egirdir).merge(vegetation_egirdir).merge(bare_egirdir).merge(water_beysehir).merge(built_beysehir).merge(vegetation_beysehir).merge(bare_beysehir).merge(water_titicaca).merge(built_titicaca).merge(vegetation_titicaca).merge(bare_titicaca).merge(water_urmia).merge(built_urmia).merge(vegetation_urmia).merge(bare_urmia);
+} else {
+  gcps = water_burder.merge(built_burder).merge(vegetation_burder).merge(bare_burder).merge(snow_burder).merge(water_mead).merge(built_mead).merge(vegetation_mead).merge(bare_mead).merge(snow_mead).merge(water_egirdir).merge(built_egirdir).merge(vegetation_egirdir).merge(bare_egirdir).merge(snow_egirdir).merge(water_beysehir).merge(built_beysehir).merge(vegetation_beysehir).merge(bare_beysehir).merge(snow_beysehir).merge(water_titicaca).merge(built_titicaca).merge(vegetation_titicaca).merge(bare_titicaca).merge(snow_titicaca).merge(water_urmia).merge(built_urmia).merge(vegetation_urmia).merge(bare_urmia).merge(snow_urmia);
+}
+
+
+var gcps_all = gcps.randomColumn();
+
+
+var trainingGcp = gcps_all
+
+
+var fused_training_burdur = dwcomposite_training_burdur.addBands(composite_training_burdur); 
+var fused_training_mead = dwcomposite_training_mead.addBands(composite_training_mead); 
+var fused_training_egirdir = dwcomposite_training_egirdir.addBands(composite_training_egirdir); 
+var fused_training__beysehir = dwcomposite_training__beysehir.addBands(composite_training_beysehir); 
+var fused_training__titicaca = dwcomposite_training__titicaca.addBands(composite_training_titicaca); 
+var fused_training_urmia = dwcomposite_training_urmia.addBands(composite_training_urmia);
+
+
+// Overlay the point on the image to get training data.
+var bands = ['B1','B2','B3','B4','B5','B6','B7','B8','B8A','B11','NDVI','NDWI','NDBI','VV','VH'];
+
+var image_training_burdur = fused_training_burdur.select(bands);
+
+var training_burdur = image_training_burdur.sampleRegions({
+  collection: trainingGcp, 
+  properties: ['class'], 
+  scale: 10,
+  tileScale: 16
+});
+
+var image_training_mead = fused_training_mead.select(bands);
+
+var training_mead = image_training_mead.sampleRegions({
+  collection: trainingGcp, 
+  properties: ['class'], 
+  scale: 10,
+  tileScale: 16
+});
+
+var image_training_egirdir = fused_training_egirdir.select(bands);
+
+var training_egirdir = image_training_egirdir.sampleRegions({
+  collection: trainingGcp, 
+  properties: ['class'], 
+  scale: 10,
+  tileScale: 16
+});
+
+var image_training_beysehir = fused_training__beysehir.select(bands);
+
+var training_beysehir = image_training_beysehir.sampleRegions({
+  collection: trainingGcp, 
+  properties: ['class'], 
+  scale: 10,
+  tileScale: 16
+});
+
+var image_training_titicaca = fused_training__titicaca.select(bands);
+
+var training_titicaca = image_training_titicaca.sampleRegions({
+  collection: trainingGcp, 
+  properties: ['class'], 
+  scale: 10,
+  tileScale: 16
+});
+
+var image_training_urmia = fused_training_urmia.select(bands);
+var image = fused.select(bands);
+
+var training_urmia = image_training_urmia.sampleRegions({
+  collection: trainingGcp, 
+  properties: ['class'], 
+  scale: 10,
+  tileScale: 16
+});
+
+// Concatenate all training features into a single feature collection
+var all_training_features = training_burdur.merge(training_mead).merge(training_egirdir).merge(training_beysehir);
+
+// Train a classifier.
+var classifier = ee.Classifier.smileRandomForest(50).train({
+  features: all_training_features.select(['B1','B2','B3','B4','B5','B6','B7','B8','B8A','B11','NDVI','NDWI','NDBI','VV','VH','class']),  
+  classProperty: 'class', 
+  //inputProperties: image.bandNames()
+  inputProperties: bands
+});
+
+
+// // Classify the image.
+var classified = image.select(bands).classify(classifier);
+// Choose a 3-color palette
+// Assign a color for each class in the following order
+var palette = [
+  '#241bd6', // water (1)  // blue
+  '#d63000', // built (2)  // red
+  '#98ff00', //  vegetation (3) // green
+  '#c7c28c', //  bare (4) // beige
+  '#23d6d4'  // snow (5) // light blue
+];
+
+// Define a kernel (structuring element) for the majority filter
+var kernel = ee.Kernel.square({
+  radius: 3
+});
+
+// Apply a focal mode filter to perform a majority filter operation
+var filteredImage = classified.focal_mode({
+  kernel: kernel,
+  iterations: 1
+});
+
+Map.addLayer(filteredImage.clip(roi), {min: 1, max: 5, palette: palette}, 'Fused Classification');
+
+print(classifier.explain(),'classifier explanation');
+
+
+// Area Calculation for Images
+var areaImage = ee.Image.pixelArea().addBands(
+      filteredImage)
+ 
+var areas = areaImage.reduceRegion({
+      reducer: ee.Reducer.sum().group({
+      groupField: 1,
+      groupName: 'class',
+    }),
+    geometry: roi,
+    scale: 100,
+    maxPixels: 1e100
+    }); 
+ 
+print(areas)
+var classAreas = ee.List(areas.get('groups'))
+ 
+var classAreaLists = classAreas.map(function(item) {
+  var areaDict = ee.Dictionary(item)
+  var classNumber = ee.Number(areaDict.get('class')).format()
+  var area = ee.Number(
+    areaDict.get('sum')).divide(1e6)
+  return ee.List([classNumber, area])
+})
+ 
+ // Convert class areas to a dictionary
+  var classAreaDict = ee.Dictionary(classAreaLists.flatten());
+
+
+  // Define a mapping from class numbers to class names
+  var classNames = {
+    '1': 'Water',
+    '2': 'Urban',
+    '3': 'Vegetation',
+    '4': 'Bare',
+    '5': 'Snow'
+  };
+
+  // Display class areas in the UI panel with class names
+  classAreaDict.evaluate(function(results) {
+    if (!results || Object.keys(results).length === 0) {
+      classAreaLabel.setValue('No classes detected or area calculation failed.');
+      return;
+    }
+
+    var resultText = 'Class Area Coverage:\n';
+    Object.keys(results).forEach(function(key) {
+      var className = classNames[key] || 'Unknown Class';
+      resultText += className + ': ' + results[key].toFixed(2) + ' km²\n';
+    });
+    classAreaLabel.setValue(resultText);
+  });
+
+  var classAreaLabel = ui.Label({
+    value: 'Class Areas:',
+    style: { whiteSpace: 'pre-wrap', fontSize: '12px', padding: '8px' }
+  });
+
+panel.add(classAreaLabel);
+
+})
+
+// Define the legend labels and colors
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-right',
+    padding: '8px 15px'
+  }
+});
+
+var legendTitle = ui.Label({
+  value: 'Classification Legend',
+  style: {fontWeight: 'bold', fontSize: '16px', margin: '0 0 6px 0'}
+});
+legend.add(legendTitle);
+
+var makeRow = function(color, name) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: color,
+      padding: '8px',
+      margin: '0 0 4px 0'
+    }
+  });
+  var description = ui.Label({
+    value: name,
+    style: {margin: '0 0 4px 6px'}
+  });
+  return ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+};
+
+var palette = [
+  '#241bd6', // water (1)  // blue
+  '#d63000', // built (2)  // red
+  '#98ff00', // vegetation (3) // green
+  '#c7c28c', // bare (4) // beige
+  '#23d6d4'  // snow (5) // light blue
+];
+
+var names = [
+  'Water',
+  'Urban',
+  'Vegetation',
+  'Bare',
+  'Snow'
+];
+
+// Add color and name for each class
+for (var i = 0; i < names.length; i++) {
+  legend.add(makeRow(palette[i], names[i]));
+}
+
+// Add the legend to the map
+Map.add(legend);
+
+// Add the panel to the map
+Map.add(panel);
+
+// Add UI elements
+
+panel.add(titleLabel);
+panel.add(roiLabel);
+panel.add(draw_aoi_button);
+panel.add(startDateLabel);
+panel.add(startDateInput);
+panel.add(endDateLabel);
+panel.add(endDateInput);
+panel.add(excludeSnowCheckbox);
+panel.add(runButton);
